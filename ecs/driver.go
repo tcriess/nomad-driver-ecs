@@ -11,6 +11,8 @@ import (
 	"github.com/hashicorp/nomad-driver-ecs/version"
 	"github.com/hashicorp/nomad/client/structs"
 	"github.com/hashicorp/nomad/drivers/shared/eventer"
+	"github.com/hashicorp/nomad/helper/pluginutils/hclutils"
+	_ "github.com/hashicorp/nomad/helper/pluginutils/hclutils"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
@@ -19,7 +21,7 @@ import (
 
 const (
 	// pluginName is the name of the plugin.
-	pluginName = "ecs"
+	pluginName = "ecsexp"
 
 	// fingerprintPeriod is the interval at which the driver will send
 	// fingerprint responses.
@@ -50,7 +52,9 @@ var (
 	// taskConfigSpec represents an ECS task configuration object.
 	// https://docs.aws.amazon.com/AmazonECS/latest/developerguide/scheduling_tasks.html
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"task": hclspec.NewBlock("task", false, awsECSTaskConfigSpec),
+		"task":      hclspec.NewBlock("task", false, awsECSTaskConfigSpec),
+		"advertise": hclspec.NewAttr("advertise", "bool", false),
+		"port_map":  hclspec.NewAttr("port_map", "list(map(number))", false),
 	})
 
 	// awsECSTaskConfigSpec are the high level configuration options for
@@ -124,7 +128,9 @@ type DriverConfig struct {
 
 // TaskConfig is the driver configuration of a task within a job
 type TaskConfig struct {
-	Task ECSTaskConfig `codec:"task"`
+	Task      ECSTaskConfig      `codec:"task"`
+	PortMap   hclutils.MapStrInt `codec:"port_map"`
+	Advertise bool               `codec:"advertise"`
 }
 
 type ECSTaskConfig struct {
@@ -157,6 +163,7 @@ type TaskState struct {
 	ContainerName string
 	ARN           string
 	StartedAt     time.Time
+	DriverNetwork *drivers.DriverNetwork
 }
 
 // NewECSDriver returns a new DriverPlugin implementation
@@ -308,7 +315,7 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	d.logger.Info("ecs task recovered", "arn", taskState.ARN,
 		"started_at", taskState.StartedAt)
 
-	h := newTaskHandle(d.logger, taskState, handle.Config, d.client)
+	h := newTaskHandle(d.logger, taskState, handle.Config, d.client, taskState.DriverNetwork)
 
 	d.tasks.Set(handle.Config.ID, h)
 
@@ -334,20 +341,50 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	handle := drivers.NewTaskHandle(taskHandleVersion)
 	handle.Config = cfg
 
-	arn, err := d.client.RunTask(context.Background(), driverConfig)
+	arn, ip, rt, err := d.client.RunTask(context.Background(), driverConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to start ECS task: %v", err)
 	}
 
-	driverState := TaskState{
-		TaskConfig: cfg,
-		StartedAt:  time.Now(),
-		ARN:        arn,
+	d.logger.Info("ecs run task", "tasks len", len(rt.Tasks), "containters len", len(rt.Tasks[0].Containers))
+	if len(rt.Tasks[0].Containers) > 0 {
+		d.logger.Info("ecs run task", "network bindings len", len(rt.Tasks[0].Containers[0].NetworkBindings))
+		d.logger.Info("ecs run task", "network interfaces len", len(rt.Tasks[0].Containers[0].NetworkInterfaces))
+		if len(rt.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
+			d.logger.Info("ecs run task", "network interfaces ip addr", rt.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
+		}
+		d.logger.Info("ecs run task", "container", rt.Tasks[0].Containers[0])
 	}
 
-	d.logger.Info("ecs task started", "arn", driverState.ARN, "started_at", driverState.StartedAt)
+	currentStatus := *rt.Tasks[0].LastStatus
+	for currentStatus != ecsTaskStatusRunning && currentStatus != ecsTaskStatusStopped {
+		<-time.After(10 * time.Second)
+		currentStatus, ip, err = d.client.DescribeTaskStatus(context.Background(), arn)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to start ECS task: %v", err)
+		}
+	}
 
-	h := newTaskHandle(d.logger, driverState, cfg, d.client)
+	var net *drivers.DriverNetwork
+	if ip != "" && driverConfig.Advertise {
+		d.logger.Info("setting net")
+		net = &drivers.DriverNetwork{
+			PortMap:       driverConfig.PortMap,
+			IP:            ip,
+			AutoAdvertise: true,
+		}
+	}
+
+	driverState := TaskState{
+		TaskConfig:    cfg,
+		StartedAt:     time.Now(),
+		ARN:           arn,
+		DriverNetwork: net,
+	}
+
+	d.logger.Info("ecs task started", "arn", driverState.ARN, "ip", ip, "started_at", driverState.StartedAt)
+
+	h := newTaskHandle(d.logger, driverState, cfg, d.client, net)
 
 	if err := handle.SetDriverState(&driverState); err != nil {
 		d.logger.Error("failed to start task, error setting driver state", "error", err)
@@ -358,7 +395,8 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	d.tasks.Set(cfg.ID, h)
 
 	go h.run()
-	return handle, nil, nil
+
+	return handle, net, nil
 }
 
 func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {

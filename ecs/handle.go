@@ -14,6 +14,10 @@ import (
 
 // These represent the ECS task terminal lifecycle statuses.
 const (
+	ecsTaskStatusProvisioning   = "PROVISIONING"
+	ecsTaskStatusPending        = "PENDING"
+	ecsTaskStatusActivating     = "ACTIVATING"
+	ecsTaskStatusRunning        = "RUNNING"
 	ecsTaskStatusDeactivating   = "DEACTIVATING"
 	ecsTaskStatusStopping       = "STOPPING"
 	ecsTaskStatusDeprovisioning = "DEPROVISIONING"
@@ -44,9 +48,11 @@ type taskHandle struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	net *drivers.DriverNetwork
 }
 
-func newTaskHandle(logger hclog.Logger, ts TaskState, taskConfig *drivers.TaskConfig, ecsClient ecsClientInterface) *taskHandle {
+func newTaskHandle(logger hclog.Logger, ts TaskState, taskConfig *drivers.TaskConfig, ecsClient ecsClientInterface, net *drivers.DriverNetwork) *taskHandle {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger = logger.Named("handle").With("arn", ts.ARN)
 
@@ -62,6 +68,7 @@ func newTaskHandle(logger hclog.Logger, ts TaskState, taskConfig *drivers.TaskCo
 		detach:     false,
 		ctx:        ctx,
 		cancel:     cancel,
+		net:        net,
 	}
 
 	return h
@@ -81,6 +88,7 @@ func (h *taskHandle) TaskStatus() *drivers.TaskStatus {
 		DriverAttributes: map[string]string{
 			"arn": h.arn,
 		},
+		NetworkOverride: h.net,
 	}
 }
 
@@ -117,7 +125,7 @@ func (h *taskHandle) run() {
 		select {
 		case <-time.After(5 * time.Second):
 
-			status, err := h.ecsClient.DescribeTaskStatus(h.ctx, h.arn)
+			status, _, err := h.ecsClient.DescribeTaskStatus(h.ctx, h.arn)
 			if err != nil {
 				h.handleRunError(err, "failed to find ECS task")
 				return
@@ -194,7 +202,7 @@ func (h *taskHandle) stopTask() error {
 	for {
 		select {
 		case <-time.After(5 * time.Second):
-			status, err := h.ecsClient.DescribeTaskStatus(context.TODO(), h.arn)
+			status, _, err := h.ecsClient.DescribeTaskStatus(context.TODO(), h.arn)
 			if err != nil {
 				return err
 			}

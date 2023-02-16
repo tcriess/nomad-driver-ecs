@@ -18,13 +18,13 @@ type ecsClientInterface interface {
 	DescribeCluster(ctx context.Context) error
 
 	// DescribeTaskStatus attempts to return the current health status of the
-	// ECS task and should be used for health checking.
-	DescribeTaskStatus(ctx context.Context, taskARN string) (string, error)
+	// ECS task and the IP address and should be used for health checking.
+	DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, error)
 
 	// RunTask is used to trigger the running of a new ECS task based on the
-	// provided configuration. The ARN of the task, as well as any errors are
-	// returned to the caller.
-	RunTask(ctx context.Context, cfg TaskConfig) (string, error)
+	// provided configuration. The ARN of the task, the IP address, as well
+	// as any errors are returned to the caller.
+	RunTask(ctx context.Context, cfg TaskConfig) (string, string, *ecs.RunTaskOutput, error)
 
 	// StopTask stops the running ECS task, adding a custom message which can
 	// be viewed via the AWS console specifying it was this Nomad driver which
@@ -60,7 +60,7 @@ func (c awsEcsClient) DescribeCluster(ctx context.Context) error {
 
 // DescribeTaskStatus satisfies the ecs.ecsClientInterface DescribeTaskStatus
 // interface function.
-func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (string, error) {
+func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, error) {
 	input := ecs.DescribeTasksInput{
 		Cluster: aws.String(c.cluster),
 		Tasks:   []string{taskARN},
@@ -68,24 +68,32 @@ func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (s
 
 	resp, err := c.ecsClient.DescribeTasksRequest(&input).Send(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return *resp.Tasks[0].LastStatus, nil
+	ip := ""
+	if len(resp.Tasks[0].Containers) > 0 && len(resp.Tasks[0].Containers[0].NetworkInterfaces) > 0 && resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address != nil {
+		ip = *resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address
+	}
+	return *resp.Tasks[0].LastStatus, ip, nil
 }
 
 // RunTask satisfies the ecs.ecsClientInterface RunTask interface function.
-func (c awsEcsClient) RunTask(ctx context.Context, cfg TaskConfig) (string, error) {
+func (c awsEcsClient) RunTask(ctx context.Context, cfg TaskConfig) (string, string, *ecs.RunTaskOutput, error) {
 	input := c.buildTaskInput(cfg)
 
 	if err := input.Validate(); err != nil {
-		return "", fmt.Errorf("failed to validate: %w", err)
+		return "", "", nil, fmt.Errorf("failed to validate: %w", err)
 	}
 
 	resp, err := c.ecsClient.RunTaskRequest(input).Send(ctx)
 	if err != nil {
-		return "", err
+		return "", "", nil, err
 	}
-	return *resp.RunTaskOutput.Tasks[0].TaskArn, nil
+	var ip string
+	if len(resp.RunTaskOutput.Tasks[0].Containers) > 0 && len(resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces) > 0 && resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address != nil {
+		ip = *resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address
+	}
+	return *resp.RunTaskOutput.Tasks[0].TaskArn, ip, resp.RunTaskOutput, nil
 }
 
 // buildTaskInput is used to convert the jobspec supplied configuration input
