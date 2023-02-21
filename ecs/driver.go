@@ -20,7 +20,7 @@ import (
 
 const (
 	// pluginName is the name of the plugin.
-	pluginName = "ecsexp"
+	pluginName = "ecs"
 
 	// fingerprintPeriod is the interval at which the driver will send
 	// fingerprint responses.
