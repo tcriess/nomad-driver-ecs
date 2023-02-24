@@ -51,9 +51,10 @@ var (
 	// taskConfigSpec represents an ECS task configuration object.
 	// https://docs.aws.amazon.com/AmazonECS/latest/developerguide/scheduling_tasks.html
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"task":      hclspec.NewBlock("task", false, awsECSTaskConfigSpec),
-		"advertise": hclspec.NewAttr("advertise", "bool", false),
-		"port_map":  hclspec.NewAttr("port_map", "list(map(number))", false),
+		"task":          hclspec.NewBlock("task", false, awsECSTaskConfigSpec),
+		"advertise":     hclspec.NewAttr("advertise", "bool", false),
+		"port_map":      hclspec.NewAttr("port_map", "list(map(number))", false),
+		"start_timeout": hclspec.NewAttr("start_timeout", "string", false),
 	})
 
 	// awsECSTaskConfigSpec are the high level configuration options for
@@ -127,10 +128,15 @@ type DriverConfig struct {
 
 // TaskConfig is the driver configuration of a task within a job
 type TaskConfig struct {
-	Task      ECSTaskConfig      `codec:"task"`
-	PortMap   hclutils.MapStrInt `codec:"port_map"`
-	Advertise bool               `codec:"advertise"`
+	Task         ECSTaskConfig      `codec:"task"`
+	PortMap      hclutils.MapStrInt `codec:"port_map"`
+	Advertise    bool               `codec:"advertise"`
+	StartTimeout string             `codec:"start_timeout"`
 }
+
+const (
+	defaultStartTimeout = 5 * time.Minute
+)
 
 type ECSTaskConfig struct {
 	LaunchType           string                   `codec:"launch_type"`
@@ -322,6 +328,12 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	return nil
 }
 
+type startResult struct {
+	ip     string
+	status string
+	err    error
+}
+
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
 	if !d.config.Enabled {
 		return nil, nil, fmt.Errorf("disabled")
@@ -340,33 +352,50 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	handle := drivers.NewTaskHandle(taskHandleVersion)
 	handle.Config = cfg
 
-	arn, ip, rt, err := d.client.RunTask(context.Background(), driverConfig)
+	startTimeout, err := time.ParseDuration(driverConfig.StartTimeout)
+	if err != nil || startTimeout <= 0 {
+		d.logger.Info("invalid start timeout, setting default", "err", err.Error(), "default", defaultStartTimeout)
+		startTimeout = defaultStartTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+	arn, ip, lastStatus, err := d.client.RunTask(ctx, driverConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to start ECS task: %v", err)
 	}
 
-	d.logger.Info("ecs run task", "tasks len", len(rt.Tasks), "containters len", len(rt.Tasks[0].Containers))
-	if len(rt.Tasks[0].Containers) > 0 {
-		d.logger.Info("ecs run task", "network bindings len", len(rt.Tasks[0].Containers[0].NetworkBindings))
-		d.logger.Info("ecs run task", "network interfaces len", len(rt.Tasks[0].Containers[0].NetworkInterfaces))
-		if len(rt.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
-			d.logger.Info("ecs run task", "network interfaces ip addr", rt.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
-		}
-		d.logger.Info("ecs run task", "container", rt.Tasks[0].Containers[0])
-	}
+	if lastStatus != ecsTaskStatusRunning && lastStatus != ecsTaskStatusStopped {
+		startCh := make(chan *startResult)
+		go d.handleStart(ctx, arn, startCh)
 
-	currentStatus := *rt.Tasks[0].LastStatus
-	for currentStatus != ecsTaskStatusRunning && currentStatus != ecsTaskStatusStopped {
-		<-time.After(10 * time.Second)
-		currentStatus, ip, err = d.client.DescribeTaskStatus(context.Background(), arn)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to start ECS task: %v", err)
+		select {
+		case <-ctx.Done():
+			newCtx, newCancel := context.WithTimeout(context.Background(), time.Minute)
+			defer newCancel()
+			_ = d.client.StopTask(newCtx, arn)
+			return nil, nil, fmt.Errorf("failed to start ECS task: context done")
+
+		case <-d.ctx.Done():
+			newCtx, newCancel := context.WithTimeout(context.Background(), time.Minute)
+			defer newCancel()
+			_ = d.client.StopTask(newCtx, arn)
+			return nil, nil, fmt.Errorf("failed to start ECS task: context done")
+
+		case startRes := <-startCh:
+			if startRes.err != nil {
+				newCtx, newCancel := context.WithTimeout(context.Background(), time.Minute)
+				defer newCancel()
+				_ = d.client.StopTask(newCtx, arn)
+				return nil, nil, startRes.err
+			}
+			ip = startRes.ip
+			lastStatus = startRes.status
 		}
 	}
 
 	var net *drivers.DriverNetwork
 	if ip != "" && driverConfig.Advertise {
-		d.logger.Info("setting net")
 		net = &drivers.DriverNetwork{
 			PortMap:       driverConfig.PortMap,
 			IP:            ip,
@@ -381,8 +410,6 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		DriverNetwork: net,
 	}
 
-	d.logger.Info("ecs task started", "arn", driverState.ARN, "ip", ip, "started_at", driverState.StartedAt)
-
 	h := newTaskHandle(d.logger, driverState, cfg, d.client, net)
 
 	if err := handle.SetDriverState(&driverState); err != nil {
@@ -396,6 +423,35 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	go h.run()
 
 	return handle, net, nil
+}
+
+func (d *Driver) handleStart(ctx context.Context, arn string, startCh chan *startResult) {
+	defer close(startCh)
+	var err error
+	var lastStatus, ip string
+	for lastStatus != ecsTaskStatusRunning && lastStatus != ecsTaskStatusStopped {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-d.ctx.Done():
+			return
+
+		case <-time.After(10 * time.Second):
+		}
+		lastStatus, ip, err = d.client.DescribeTaskStatus(ctx, arn)
+		if err != nil {
+			d.logger.Warn("ecs describe task", "err", err.Error())
+			startCh <- &startResult{
+				err: err,
+			}
+			return
+		}
+	}
+	startCh <- &startResult{
+		ip:     ip,
+		status: lastStatus,
+	}
 }
 
 func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {

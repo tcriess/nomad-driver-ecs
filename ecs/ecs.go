@@ -6,6 +6,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/aws/smithy-go/ptr"
 )
 
 // ecsClientInterface encapsulates all the required AWS functionality to
@@ -22,9 +23,9 @@ type ecsClientInterface interface {
 	DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, error)
 
 	// RunTask is used to trigger the running of a new ECS task based on the
-	// provided configuration. The ARN of the task, the IP address, as well
-	// as any errors are returned to the caller.
-	RunTask(ctx context.Context, cfg TaskConfig) (string, string, *ecs.RunTaskOutput, error)
+	// provided configuration. The ARN of the task, the IP address, run status,
+	// as well as any errors are returned to the caller.
+	RunTask(ctx context.Context, cfg TaskConfig) (string, string, string, error)
 
 	// StopTask stops the running ECS task, adding a custom message which can
 	// be viewed via the AWS console specifying it was this Nomad driver which
@@ -71,29 +72,31 @@ func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (s
 		return "", "", err
 	}
 	ip := ""
-	if len(resp.Tasks[0].Containers) > 0 && len(resp.Tasks[0].Containers[0].NetworkInterfaces) > 0 && resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address != nil {
-		ip = *resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address
+	if len(resp.Tasks[0].Containers) > 0 && len(resp.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
+		ip = ptr.ToString(resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
 	}
 	return *resp.Tasks[0].LastStatus, ip, nil
 }
 
 // RunTask satisfies the ecs.ecsClientInterface RunTask interface function.
-func (c awsEcsClient) RunTask(ctx context.Context, cfg TaskConfig) (string, string, *ecs.RunTaskOutput, error) {
+func (c awsEcsClient) RunTask(ctx context.Context, cfg TaskConfig) (string, string, string, error) {
 	input := c.buildTaskInput(cfg)
 
 	if err := input.Validate(); err != nil {
-		return "", "", nil, fmt.Errorf("failed to validate: %w", err)
+		return "", "", "", fmt.Errorf("failed to validate: %w", err)
 	}
 
 	resp, err := c.ecsClient.RunTaskRequest(input).Send(ctx)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", err
 	}
+	var lastStatus string
 	var ip string
-	if len(resp.RunTaskOutput.Tasks[0].Containers) > 0 && len(resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces) > 0 && resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address != nil {
-		ip = *resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address
+	lastStatus = ptr.ToString(resp.RunTaskOutput.Tasks[0].LastStatus)
+	if len(resp.RunTaskOutput.Tasks[0].Containers) > 0 && len(resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
+		ip = ptr.ToString(resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
 	}
-	return *resp.RunTaskOutput.Tasks[0].TaskArn, ip, resp.RunTaskOutput, nil
+	return *resp.RunTaskOutput.Tasks[0].TaskArn, ip, lastStatus, nil
 }
 
 // buildTaskInput is used to convert the jobspec supplied configuration input
