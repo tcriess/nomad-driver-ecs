@@ -1,6 +1,6 @@
 module github.com/hashicorp/nomad-driver-ecs
 
-go 1.19
+go 1.18
 
 replace (
 	github.com/Microsoft/go-winio => github.com/endocrimes/go-winio v0.4.13-0.20190628114223-fb47a8b41948
