@@ -3,8 +3,10 @@ package ecs
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/external"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"github.com/hashicorp/go-hclog"
@@ -51,10 +53,12 @@ var (
 	// taskConfigSpec represents an ECS task configuration object.
 	// https://docs.aws.amazon.com/AmazonECS/latest/developerguide/scheduling_tasks.html
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"task":          hclspec.NewBlock("task", false, awsECSTaskConfigSpec),
-		"advertise":     hclspec.NewAttr("advertise", "bool", false),
-		"port_map":      hclspec.NewAttr("port_map", "list(map(number))", false),
-		"start_timeout": hclspec.NewAttr("start_timeout", "string", false),
+		"task":                   hclspec.NewBlock("task", false, awsECSTaskConfigSpec),
+		"advertise":              hclspec.NewAttr("advertise", "bool", false),
+		"port_map":               hclspec.NewAttr("port_map", "list(map(number))", false),
+		"start_timeout":          hclspec.NewAttr("start_timeout", "string", false),
+		"inline_task_definition": hclspec.NewAttr("inline_task_definition", "bool", false),
+		"task_definition":        hclspec.NewBlock("task_definition", false, awsECSTaskDefinitionSpec),
 	})
 
 	// awsECSTaskConfigSpec are the high level configuration options for
@@ -77,6 +81,25 @@ var (
 		"assign_public_ip": hclspec.NewAttr("assign_public_ip", "string", false),
 		"security_groups":  hclspec.NewAttr("security_groups", "list(string)", false),
 		"subnets":          hclspec.NewAttr("subnets", "list(string)", false),
+	})
+
+	awsECSContainerDefinitionSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"cpu":           hclspec.NewAttr("cpu", "number", true),
+		"memory":        hclspec.NewAttr("memory", "number", true),
+		"command":       hclspec.NewAttr("command", "list(string)", false),
+		"entry_point":   hclspec.NewAttr("entry_point", "list(string)", false),
+		"environment":   hclspec.NewAttr("environment", "list(map(string))", false),
+		"image":         hclspec.NewAttr("image", "string", true),
+		"port_mappings": hclspec.NewAttr("port_mappings", "list(map(number))", false),
+	})
+
+	awsECSTaskDefinitionSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"family":                hclspec.NewAttr("family", "string", true),
+		"cpu":                   hclspec.NewAttr("cpu", "string", true),
+		"memory":                hclspec.NewAttr("memory", "string", true),
+		"execution_role_arn":    hclspec.NewAttr("execution_role_arn", "string", true),
+		"task_role_arn":         hclspec.NewAttr("task_role_arn", "string", true),
+		"container_definitions": hclspec.NewBlockList("container_definitions", awsECSContainerDefinitionSpec),
 	})
 
 	// capabilities is returned by the Capabilities RPC and indicates what
@@ -128,10 +151,12 @@ type DriverConfig struct {
 
 // TaskConfig is the driver configuration of a task within a job
 type TaskConfig struct {
-	Task         ECSTaskConfig      `codec:"task"`
-	PortMap      hclutils.MapStrInt `codec:"port_map"`
-	Advertise    bool               `codec:"advertise"`
-	StartTimeout string             `codec:"start_timeout"`
+	Task                 ECSTaskConfig      `codec:"task"`
+	PortMap              hclutils.MapStrInt `codec:"port_map"`
+	Advertise            bool               `codec:"advertise"`
+	StartTimeout         string             `codec:"start_timeout"`
+	InlineTaskDefinition bool               `codec:"inline_task_definition"`
+	TaskDefinition       ECSTaskDefinition  `codec:"task_definition"`
 }
 
 const (
@@ -143,6 +168,25 @@ type ECSTaskConfig struct {
 	TaskDefinition       string                   `codec:"task_definition"`
 	NetworkConfiguration TaskNetworkConfiguration `codec:"network_configuration"`
 	Tags                 []Tag                    `codec:"tags"`
+}
+
+type ECSTaskDefinition struct {
+	Family               string                   `codec:"family"`
+	Cpu                  string                   `codec:"cpu"`
+	Memory               string                   `codec:"memory"`
+	ExecutionRoleArn     string                   `codec:"execution_role_arn"`
+	TaskRoleArn          string                   `codec:"task_role_arn"`
+	ContainerDefinitions []ECSContainerDefinition `codec:"container_definitions"`
+}
+
+type ECSContainerDefinition struct {
+	Cpu          int64              `codec:"cpu"`
+	Memory       int64              `codec:"memory"`
+	Command      []string           `codec:"command"`
+	EntryPoint   []string           `codec:"entry_point"`
+	Environment  []Tag              `codec:"environment"`
+	Image        string             `codec:"image"`
+	PortMappings hclutils.MapStrInt `codec:"port_mappings"`
 }
 
 type Tag struct {
@@ -360,6 +404,49 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 
 	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
+	if driverConfig.InlineTaskDefinition {
+		containerDefinitions := make([]ecs.ContainerDefinition, len(driverConfig.TaskDefinition.ContainerDefinitions))
+		for i, cd := range driverConfig.TaskDefinition.ContainerDefinitions {
+			env := make([]ecs.KeyValuePair, len(cd.Environment))
+			for j, e := range cd.Environment {
+				env[j] = ecs.KeyValuePair{
+					Name:  aws.String(e.Key),
+					Value: aws.String(e.Value),
+				}
+			}
+			pm := make([]ecs.PortMapping, len(cd.PortMappings))
+			for jStr, p := range cd.PortMappings {
+				j, err := strconv.ParseUint(jStr, 10, 64)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to convert port mapping index to int: %v", err)
+				}
+				pm[j] = ecs.PortMapping{
+					ContainerPort: aws.Int64(int64(p)),
+				}
+			}
+			containerDefinitions[i] = ecs.ContainerDefinition{
+				Cpu:          aws.Int64(cd.Cpu),
+				Memory:       aws.Int64(cd.Memory),
+				Command:      cd.Command,
+				EntryPoint:   cd.EntryPoint,
+				Environment:  env,
+				Image:        aws.String(cd.Image),
+				PortMappings: pm,
+			}
+		}
+		same, err := d.client.CheckTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to check ECS task definition: %v", err)
+		}
+		if !same {
+			// the task definition is new, so we create it here
+			familyVersion, err := d.client.RegisterTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to register ECS task definition: %v", err)
+			}
+			d.logger.Info("new task definition version", "family", driverConfig.TaskDefinition.Family, "version", familyVersion)
+		}
+	}
 	arn, ip, lastStatus, err := d.client.RunTask(ctx, driverConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to start ECS task: %v", err)

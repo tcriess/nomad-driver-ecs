@@ -31,6 +31,13 @@ type ecsClientInterface interface {
 	// be viewed via the AWS console specifying it was this Nomad driver which
 	// performed the action.
 	StopTask(ctx context.Context, taskARN string) error
+
+	// RegisterTaskDefinition creates a new task definition, which can then be
+	// used to run a task.
+	RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int64, error)
+
+	// CheckTaskDefinition checks if the task definition is the same as the one in AWS
+	CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error)
 }
 
 type awsEcsClient struct {
@@ -161,4 +168,213 @@ func (c awsEcsClient) StopTask(ctx context.Context, taskARN string) error {
 
 	_, err := c.ecsClient.StopTaskRequest(&input).Send(ctx)
 	return err
+}
+
+func NewContainerDefinition(command []string, entryPoint []string, env map[string]string, image string, memory int64, name string, tcpMap map[int64]int64, privileged bool, repositoryCredentials string, workingDirectory string) ecs.ContainerDefinition {
+	environment := make([]ecs.KeyValuePair, 0, len(env))
+	for k, v := range env {
+		environment = append(environment, ecs.KeyValuePair{
+			Name:  aws.String(k),
+			Value: aws.String(v),
+		})
+	}
+	portMappings := make([]ecs.PortMapping, 0, len(tcpMap))
+	for k, v := range tcpMap {
+		portMappings = append(portMappings, ecs.PortMapping{
+			ContainerPort: aws.Int64(v),
+			HostPort:      aws.Int64(k),
+			Protocol:      "tcp",
+		})
+	}
+	var repCred *ecs.RepositoryCredentials
+	if repositoryCredentials != "" {
+		repCred = &ecs.RepositoryCredentials{CredentialsParameter: aws.String(repositoryCredentials)}
+	}
+	var workDir *string
+	if workingDirectory != "" {
+		workDir = aws.String(workingDirectory)
+	}
+	return ecs.ContainerDefinition{
+		Command: command,
+		// Cpu:                    nil,
+		// DependsOn:              nil,
+		// DisableNetworking:      nil,
+		// DnsSearchDomains:       nil,
+		// DnsServers:             nil,
+		// DockerLabels:           nil,
+		// DockerSecurityOptions:  nil,
+		EntryPoint:  entryPoint,
+		Environment: environment,
+		// Essential:              nil,
+		// ExtraHosts:             nil,
+		// FirelensConfiguration:  nil,
+		// HealthCheck:            nil,
+		// Hostname:               nil,
+		Image: aws.String(image),
+		// Interactive:            nil,
+		// Links:                  nil,
+		// LinuxParameters:        nil,
+		// LogConfiguration:       nil,
+		Memory: aws.Int64(memory),
+		// MemoryReservation:      nil,
+		// MountPoints:            nil,
+		Name:         aws.String(name),
+		PortMappings: portMappings,
+		Privileged:   aws.Bool(privileged),
+		// PseudoTerminal:         nil,
+		// ReadonlyRootFilesystem: nil,
+		RepositoryCredentials: repCred,
+		// ResourceRequirements:   nil,
+		// Secrets:                nil,
+		// StartTimeout:           nil,
+		// StopTimeout:            nil,
+		// SystemControls:         nil,
+		// Ulimits:                nil,
+		// User:                   nil,
+		// VolumesFrom:            nil,
+		WorkingDirectory: workDir,
+	}
+}
+
+func checkSlice[t comparable](arr1, arr2 []t, order bool) (same bool) {
+	if len(arr1) != len(arr2) {
+		return false
+	}
+	if order {
+		for i, el1 := range arr1 {
+			if el1 != arr2[i] {
+				return false
+			}
+		}
+	} else {
+		for _, el1 := range arr1 {
+			found := false
+			for _, el2 := range arr2 {
+				if el1 == el2 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func checkKVSlice(arr1, arr2 []ecs.KeyValuePair, order bool) (same bool) {
+	if len(arr1) != len(arr2) {
+		return false
+	}
+	if order {
+		for i, el1 := range arr1 {
+			if el1.Name != arr2[i].Name || aws.StringValue(el1.Value) != aws.StringValue(arr2[i].Value) {
+				return false
+			}
+		}
+	} else {
+		for _, el1 := range arr1 {
+			found := false
+			for _, el2 := range arr2 {
+				if el1.Name == el2.Name && aws.StringValue(el1.Value) == aws.StringValue(el2.Value) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func checkPMSlice(arr1, arr2 []ecs.PortMapping, order bool) (same bool) {
+	if len(arr1) != len(arr2) {
+		return false
+	}
+	if order {
+		for i, el1 := range arr1 {
+			if el1.Protocol != arr2[i].Protocol || aws.Int64Value(el1.HostPort) != aws.Int64Value(arr2[i].HostPort) || aws.Int64Value(el1.ContainerPort) != aws.Int64Value(arr2[i].ContainerPort) {
+				return false
+			}
+		}
+	} else {
+		for _, el1 := range arr1 {
+			found := false
+			for _, el2 := range arr2 {
+				if el1.Protocol == el2.Protocol && aws.Int64Value(el1.HostPort) == aws.Int64Value(el2.HostPort) && aws.Int64Value(el1.ContainerPort) == aws.Int64Value(el2.ContainerPort) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error) {
+	input := ecs.DescribeTaskDefinitionInput{
+		// Include:        nil,
+		TaskDefinition: aws.String(family), // family (latest active), family:revision or full arn
+	}
+	resp, err := c.ecsClient.DescribeTaskDefinitionRequest(&input).Send(ctx)
+	if err != nil {
+		return false, err
+	}
+	isSame := true
+	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Cpu) != cpu {
+		isSame = false
+	}
+	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Memory) != memory {
+		isSame = false
+	}
+	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.ExecutionRoleArn) != executionRoleArn {
+		isSame = false
+	}
+	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.TaskRoleArn) != taskRoleArn {
+		isSame = false
+	}
+	for _, cd := range containerDefinitions {
+		found := false
+		for _, existingCd := range resp.DescribeTaskDefinitionOutput.TaskDefinition.ContainerDefinitions {
+			if aws.Int64Value(existingCd.Cpu) == aws.Int64Value(cd.Cpu) && aws.Int64Value(existingCd.Memory) == aws.Int64Value(cd.Memory) && checkSlice(existingCd.Command, cd.Command, true) && checkSlice(existingCd.EntryPoint, cd.EntryPoint, true) && checkKVSlice(existingCd.Environment, cd.Environment, false) && aws.StringValue(existingCd.Image) == aws.StringValue(cd.Image) && checkPMSlice(existingCd.PortMappings, cd.PortMappings, false) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return isSame, nil
+}
+
+func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int64, error) {
+	input := ecs.RegisterTaskDefinitionInput{
+		ContainerDefinitions: containerDefinitions,
+		Cpu:                  aws.String(cpu),
+		ExecutionRoleArn:     aws.String(executionRoleArn),
+		Family:               aws.String(family),
+		// InferenceAccelerators:   nil,
+		// IpcMode:                 "",
+		Memory:      aws.String(memory),
+		NetworkMode: "awsvpc",
+		// PidMode:                 "",
+		// PlacementConstraints:    nil,
+		// ProxyConfiguration:      nil,
+		// RequiresCompatibilities: nil,
+		Tags:        nil,
+		TaskRoleArn: aws.String(taskRoleArn),
+		// Volumes:                 nil,
+	}
+	resp, err := c.ecsClient.RegisterTaskDefinitionRequest(&input).Send(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return aws.Int64Value(resp.RegisterTaskDefinitionOutput.TaskDefinition.Revision), nil
 }
