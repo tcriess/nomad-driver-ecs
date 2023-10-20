@@ -3,7 +3,6 @@ package ecs
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -84,13 +83,20 @@ var (
 	})
 
 	awsECSContainerDefinitionSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"name":          hclspec.NewAttr("name", "string", true),
 		"cpu":           hclspec.NewAttr("cpu", "number", true),
 		"memory":        hclspec.NewAttr("memory", "number", true),
 		"command":       hclspec.NewAttr("command", "list(string)", false),
 		"entry_point":   hclspec.NewAttr("entry_point", "list(string)", false),
 		"environment":   hclspec.NewAttr("environment", "list(map(string))", false),
 		"image":         hclspec.NewAttr("image", "string", true),
-		"port_mappings": hclspec.NewAttr("port_mappings", "list(map(number))", false),
+		"port_mappings": hclspec.NewBlockList("port_mappings", awsECSPortMappingSpec),
+	})
+
+	awsECSPortMappingSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"container_port": hclspec.NewAttr("container_port", "number", true),
+		"host_port":      hclspec.NewAttr("host_port", "number", true),
+		"protocol":       hclspec.NewAttr("protocol", "string", true),
 	})
 
 	awsECSTaskDefinitionSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -98,7 +104,7 @@ var (
 		"cpu":                   hclspec.NewAttr("cpu", "string", true),
 		"memory":                hclspec.NewAttr("memory", "string", true),
 		"execution_role_arn":    hclspec.NewAttr("execution_role_arn", "string", true),
-		"task_role_arn":         hclspec.NewAttr("task_role_arn", "string", true),
+		"task_role_arn":         hclspec.NewAttr("task_role_arn", "string", false),
 		"container_definitions": hclspec.NewBlockList("container_definitions", awsECSContainerDefinitionSpec),
 	})
 
@@ -180,18 +186,25 @@ type ECSTaskDefinition struct {
 }
 
 type ECSContainerDefinition struct {
-	Cpu          int64              `codec:"cpu"`
-	Memory       int64              `codec:"memory"`
-	Command      []string           `codec:"command"`
-	EntryPoint   []string           `codec:"entry_point"`
-	Environment  []Tag              `codec:"environment"`
-	Image        string             `codec:"image"`
-	PortMappings hclutils.MapStrInt `codec:"port_mappings"`
+	Name         string        `codec:"name"`
+	Cpu          int64         `codec:"cpu"`
+	Memory       int64         `codec:"memory"`
+	Command      []string      `codec:"command"`
+	EntryPoint   []string      `codec:"entry_point"`
+	Environment  []Tag         `codec:"environment"`
+	Image        string        `codec:"image"`
+	PortMappings []PortMapping `codec:"port_mappings"`
 }
 
 type Tag struct {
 	Key   string `codec:"key"`
 	Value string `codec:"value"`
+}
+
+type PortMapping struct {
+	ContainerPort int64  `codec:"container_port"`
+	HostPort      int64  `codec:"host_port"`
+	Protocol      string `codec:"protocol"`
 }
 
 type TaskNetworkConfiguration struct {
@@ -415,16 +428,15 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 				}
 			}
 			pm := make([]ecs.PortMapping, len(cd.PortMappings))
-			for jStr, p := range cd.PortMappings {
-				j, err := strconv.ParseUint(jStr, 10, 64)
-				if err != nil {
-					return nil, nil, fmt.Errorf("failed to convert port mapping index to int: %v", err)
-				}
+			for j, singlePortMapping := range cd.PortMappings {
 				pm[j] = ecs.PortMapping{
-					ContainerPort: aws.Int64(int64(p)),
+					ContainerPort: aws.Int64(singlePortMapping.ContainerPort),
+					HostPort:      aws.Int64(singlePortMapping.HostPort),
+					Protocol:      ecs.TransportProtocol(singlePortMapping.Protocol),
 				}
 			}
 			containerDefinitions[i] = ecs.ContainerDefinition{
+				Name:         aws.String(cd.Name),
 				Cpu:          aws.Int64(cd.Cpu),
 				Memory:       aws.Int64(cd.Memory),
 				Command:      cd.Command,

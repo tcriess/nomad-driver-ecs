@@ -318,6 +318,16 @@ func checkPMSlice(arr1, arr2 []ecs.PortMapping, order bool) (same bool) {
 }
 
 func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error) {
+	listInput := ecs.ListTaskDefinitionFamiliesInput{
+		FamilyPrefix: aws.String(family),
+	}
+	listResp, err := c.ecsClient.ListTaskDefinitionFamiliesRequest(&listInput).Send(ctx)
+	if err != nil {
+		return false, err
+	}
+	if len(listResp.ListTaskDefinitionFamiliesOutput.Families) == 0 {
+		return false, nil
+	}
 	input := ecs.DescribeTaskDefinitionInput{
 		// Include:        nil,
 		TaskDefinition: aws.String(family), // family (latest active), family:revision or full arn
@@ -368,9 +378,11 @@ func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string,
 		// PlacementConstraints:    nil,
 		// ProxyConfiguration:      nil,
 		// RequiresCompatibilities: nil,
-		Tags:        nil,
-		TaskRoleArn: aws.String(taskRoleArn),
+		Tags: nil,
 		// Volumes:                 nil,
+	}
+	if taskRoleArn != "" {
+		input.TaskRoleArn = aws.String(taskRoleArn)
 	}
 	resp, err := c.ecsClient.RegisterTaskDefinitionRequest(&input).Send(ctx)
 	if err != nil {
