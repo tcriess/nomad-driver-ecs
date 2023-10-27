@@ -83,14 +83,15 @@ var (
 	})
 
 	awsECSContainerDefinitionSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"name":          hclspec.NewAttr("name", "string", true),
-		"cpu":           hclspec.NewAttr("cpu", "number", true),
-		"memory":        hclspec.NewAttr("memory", "number", true),
-		"command":       hclspec.NewAttr("command", "list(string)", false),
-		"entry_point":   hclspec.NewAttr("entry_point", "list(string)", false),
-		"environment":   hclspec.NewAttr("environment", "list(map(string))", false),
-		"image":         hclspec.NewAttr("image", "string", true),
-		"port_mappings": hclspec.NewBlockList("port_mappings", awsECSPortMappingSpec),
+		"name":            hclspec.NewAttr("name", "string", true),
+		"cpu":             hclspec.NewAttr("cpu", "number", true),
+		"memory":          hclspec.NewAttr("memory", "number", true),
+		"command":         hclspec.NewAttr("command", "list(string)", false),
+		"entry_point":     hclspec.NewAttr("entry_point", "list(string)", false),
+		"environment":     hclspec.NewAttr("environment", "list(map(string))", false),
+		"image":           hclspec.NewAttr("image", "string", true),
+		"port_mappings":   hclspec.NewBlockList("port_mappings", awsECSPortMappingSpec),
+		"credentials_arn": hclspec.NewAttr("credentials_arn", "string", false),
 	})
 
 	awsECSPortMappingSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -186,14 +187,15 @@ type ECSTaskDefinition struct {
 }
 
 type ECSContainerDefinition struct {
-	Name         string        `codec:"name"`
-	Cpu          int64         `codec:"cpu"`
-	Memory       int64         `codec:"memory"`
-	Command      []string      `codec:"command"`
-	EntryPoint   []string      `codec:"entry_point"`
-	Environment  []Tag         `codec:"environment"`
-	Image        string        `codec:"image"`
-	PortMappings []PortMapping `codec:"port_mappings"`
+	Name           string        `codec:"name"`
+	Cpu            int64         `codec:"cpu"`
+	Memory         int64         `codec:"memory"`
+	Command        []string      `codec:"command"`
+	EntryPoint     []string      `codec:"entry_point"`
+	Environment    []Tag         `codec:"environment"`
+	Image          string        `codec:"image"`
+	PortMappings   []PortMapping `codec:"port_mappings"`
+	CredentialsArn string        `codec:"credentials_arn"`
 }
 
 type Tag struct {
@@ -435,15 +437,23 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 					Protocol:      ecs.TransportProtocol(singlePortMapping.Protocol),
 				}
 			}
+			var rc *ecs.RepositoryCredentials
+			if cd.CredentialsArn != "" {
+				rc = &ecs.RepositoryCredentials{
+					CredentialsParameter: aws.String(cd.CredentialsArn),
+				}
+			}
+
 			containerDefinitions[i] = ecs.ContainerDefinition{
-				Name:         aws.String(cd.Name),
-				Cpu:          aws.Int64(cd.Cpu),
-				Memory:       aws.Int64(cd.Memory),
-				Command:      cd.Command,
-				EntryPoint:   cd.EntryPoint,
-				Environment:  env,
-				Image:        aws.String(cd.Image),
-				PortMappings: pm,
+				Name:                  aws.String(cd.Name),
+				Cpu:                   aws.Int64(cd.Cpu),
+				Memory:                aws.Int64(cd.Memory),
+				Command:               cd.Command,
+				EntryPoint:            cd.EntryPoint,
+				Environment:           env,
+				Image:                 aws.String(cd.Image),
+				PortMappings:          pm,
+				RepositoryCredentials: rc,
 			}
 		}
 		same, err := d.client.CheckTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
