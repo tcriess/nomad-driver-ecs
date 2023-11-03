@@ -230,7 +230,7 @@ type TaskState struct {
 	DriverNetwork *drivers.DriverNetwork
 }
 
-// NewECSDriver returns a new DriverPlugin implementation
+// NewPlugin returns a new drivers.DriverPlugin implementation
 func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger = logger.Named(pluginName)
@@ -287,6 +287,7 @@ func (d *Driver) getAwsSdk(cluster string) (ecsClientInterface, error) {
 	return awsEcsClient{
 		cluster:   cluster,
 		ecsClient: ecs.New(awsCfg),
+		logger:    d.logger,
 	}, nil
 }
 

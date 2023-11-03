@@ -9,6 +9,7 @@ replace (
 
 require (
 	github.com/aws/aws-sdk-go-v2 v0.19.0
+	github.com/aws/smithy-go v1.13.5
 	github.com/hashicorp/go-hclog v1.3.1
 	github.com/hashicorp/nomad v1.4.3
 	github.com/stretchr/testify v1.8.1
@@ -21,7 +22,6 @@ require (
 	github.com/apparentlymart/go-textseg/v13 v13.0.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/armon/go-radix v1.0.0 // indirect
-	github.com/aws/smithy-go v1.13.5 // indirect
 	github.com/cenkalti/backoff/v3 v3.2.2 // indirect
 	github.com/container-storage-interface/spec v1.4.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -29,7 +29,6 @@ require (
 	github.com/frankban/quicktest v1.14.0 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/go-test/deep v1.0.3 // indirect
 	github.com/golang-jwt/jwt/v4 v4.4.2 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/golang/snappy v0.0.4 // indirect

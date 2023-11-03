@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"github.com/aws/smithy-go/ptr"
+	"github.com/hashicorp/go-hclog"
 )
 
 // ecsClientInterface encapsulates all the required AWS functionality to
@@ -43,6 +44,7 @@ type ecsClientInterface interface {
 type awsEcsClient struct {
 	cluster   string
 	ecsClient *ecs.Client
+	logger    hclog.Logger
 }
 
 // DescribeCluster satisfies the ecs.ecsClientInterface DescribeCluster
@@ -269,7 +271,7 @@ func checkKVSlice(arr1, arr2 []ecs.KeyValuePair, order bool) (same bool) {
 	}
 	if order {
 		for i, el1 := range arr1 {
-			if el1.Name != arr2[i].Name || aws.StringValue(el1.Value) != aws.StringValue(arr2[i].Value) {
+			if aws.StringValue(el1.Name) != aws.StringValue(arr2[i].Name) || aws.StringValue(el1.Value) != aws.StringValue(arr2[i].Value) {
 				return false
 			}
 		}
@@ -277,12 +279,13 @@ func checkKVSlice(arr1, arr2 []ecs.KeyValuePair, order bool) (same bool) {
 		for _, el1 := range arr1 {
 			found := false
 			for _, el2 := range arr2 {
-				if el1.Name == el2.Name && aws.StringValue(el1.Value) == aws.StringValue(el2.Value) {
+				if aws.StringValue(el1.Name) == aws.StringValue(el2.Name) && aws.StringValue(el1.Value) == aws.StringValue(el2.Value) {
 					found = true
 					break
 				}
 			}
 			if !found {
+
 				return false
 			}
 		}
@@ -317,6 +320,7 @@ func checkPMSlice(arr1, arr2 []ecs.PortMapping, order bool) (same bool) {
 	return true
 }
 
+// CheckTaskDefinition checks if the task definition matches the already registered task definition
 func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error) {
 	listInput := ecs.ListTaskDefinitionFamiliesInput{
 		FamilyPrefix: aws.String(family),
@@ -325,6 +329,7 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 	if err != nil {
 		return false, err
 	}
+	c.logger.Info("ListTaskDefinitionFamilies", "resp", listResp)
 	if len(listResp.ListTaskDefinitionFamiliesOutput.Families) == 0 {
 		return false, nil
 	}
@@ -336,28 +341,36 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 	if err != nil {
 		return false, err
 	}
+
 	isSame := true
 	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Cpu) != cpu {
+		c.logger.Info("diff cpu", "cpu", cpu, "resp cpu", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Cpu))
 		isSame = false
 	}
 	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Memory) != memory {
+		c.logger.Info("diff memory", "memory", memory, "resp memory", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Memory))
 		isSame = false
 	}
 	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.ExecutionRoleArn) != executionRoleArn {
+		c.logger.Info("diff exec role", "exec role", executionRoleArn, "resp exec role", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.ExecutionRoleArn))
 		isSame = false
 	}
 	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.TaskRoleArn) != taskRoleArn {
+		c.logger.Info("diff task role", "task role", taskRoleArn, "resp task role", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.TaskRoleArn))
 		isSame = false
 	}
 	for _, cd := range containerDefinitions {
 		found := false
 		for _, existingCd := range resp.DescribeTaskDefinitionOutput.TaskDefinition.ContainerDefinitions {
+			c.logger.Info("checking", "existing cd", existingCd)
 			if aws.Int64Value(existingCd.Cpu) == aws.Int64Value(cd.Cpu) && aws.Int64Value(existingCd.Memory) == aws.Int64Value(cd.Memory) && checkSlice(existingCd.Command, cd.Command, true) && checkSlice(existingCd.EntryPoint, cd.EntryPoint, true) && checkKVSlice(existingCd.Environment, cd.Environment, false) && aws.StringValue(existingCd.Image) == aws.StringValue(cd.Image) && checkPMSlice(existingCd.PortMappings, cd.PortMappings, false) {
 				found = true
 				break
 			}
+			c.logger.Info("differences", "command", checkSlice(existingCd.Command, cd.Command, true), "entrypoint", checkSlice(existingCd.EntryPoint, cd.EntryPoint, true), "env", checkKVSlice(existingCd.Environment, cd.Environment, false), "pm", checkPMSlice(existingCd.PortMappings, cd.PortMappings, false))
 		}
 		if !found {
+			c.logger.Info("container definition not found", "cd", cd)
 			return false, nil
 		}
 	}
