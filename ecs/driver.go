@@ -487,7 +487,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		if !same {
 			// first create the log group, if not there yet
 			for _, cd := range driverConfig.TaskDefinition.ContainerDefinitions {
-				if lg, ok := cd.LogConfiguration.Options["awslogs_group"]; ok && lg != "" {
+				if lg, ok := cd.LogConfiguration.Options["awslogs-group"]; ok && lg != "" {
 					err := d.client.CreateLogGroup(ctx, lg)
 					if err != nil {
 						d.logger.Error("failed to create log group", "log_group", lg, "err", err.Error())
