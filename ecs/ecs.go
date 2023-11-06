@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/aws/smithy-go/ptr"
 	"github.com/hashicorp/go-hclog"
 )
@@ -35,15 +37,19 @@ type ecsClientInterface interface {
 
 	// RegisterTaskDefinition creates a new task definition, which can then be
 	// used to run a task.
-	RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int64, error)
+	RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int32, error)
 
 	// CheckTaskDefinition checks if the task definition is the same as the one in AWS
-	CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error)
+	CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error)
+
+	// CreateLogGroup creates a new log group (if it does not exist already)
+	CreateLogGroup(ctx context.Context, logGroupName string) error
 }
 
 type awsEcsClient struct {
 	cluster   string
 	ecsClient *ecs.Client
+	cwClient  *cloudwatchlogs.Client
 	logger    hclog.Logger
 }
 
@@ -52,7 +58,7 @@ type awsEcsClient struct {
 func (c awsEcsClient) DescribeCluster(ctx context.Context) error {
 	input := ecs.DescribeClustersInput{Clusters: []string{c.cluster}}
 
-	resp, err := c.ecsClient.DescribeClustersRequest(&input).Send(ctx)
+	resp, err := c.ecsClient.DescribeClusters(ctx, &input)
 	if err != nil {
 		return err
 	}
@@ -76,7 +82,7 @@ func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (s
 		Tasks:   []string{taskARN},
 	}
 
-	resp, err := c.ecsClient.DescribeTasksRequest(&input).Send(ctx)
+	resp, err := c.ecsClient.DescribeTasks(ctx, &input)
 	if err != nil {
 		return "", "", err
 	}
@@ -91,21 +97,23 @@ func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (s
 func (c awsEcsClient) RunTask(ctx context.Context, cfg TaskConfig) (string, string, string, error) {
 	input := c.buildTaskInput(cfg)
 
-	if err := input.Validate(); err != nil {
-		return "", "", "", fmt.Errorf("failed to validate: %w", err)
-	}
+	/*
+		if err := input.Validate(); err != nil {
+			return "", "", "", fmt.Errorf("failed to validate: %w", err)
+		}
+	*/
 
-	resp, err := c.ecsClient.RunTaskRequest(input).Send(ctx)
+	resp, err := c.ecsClient.RunTask(ctx, input)
 	if err != nil {
 		return "", "", "", err
 	}
 	var lastStatus string
 	var ip string
-	lastStatus = ptr.ToString(resp.RunTaskOutput.Tasks[0].LastStatus)
-	if len(resp.RunTaskOutput.Tasks[0].Containers) > 0 && len(resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
-		ip = ptr.ToString(resp.RunTaskOutput.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
+	lastStatus = ptr.ToString(resp.Tasks[0].LastStatus)
+	if len(resp.Tasks[0].Containers) > 0 && len(resp.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
+		ip = ptr.ToString(resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
 	}
-	return *resp.RunTaskOutput.Tasks[0].TaskArn, ip, lastStatus, nil
+	return *resp.Tasks[0].TaskArn, ip, lastStatus, nil
 }
 
 // buildTaskInput is used to convert the jobspec supplied configuration input
@@ -113,15 +121,15 @@ func (c awsEcsClient) RunTask(ctx context.Context, cfg TaskConfig) (string, stri
 func (c awsEcsClient) buildTaskInput(cfg TaskConfig) *ecs.RunTaskInput {
 	input := ecs.RunTaskInput{
 		Cluster:              aws.String(c.cluster),
-		Count:                aws.Int64(1),
+		Count:                aws.Int32(1),
 		StartedBy:            aws.String("nomad-ecs-driver"),
-		NetworkConfiguration: &ecs.NetworkConfiguration{AwsvpcConfiguration: &ecs.AwsVpcConfiguration{}},
+		NetworkConfiguration: &ecstypes.NetworkConfiguration{AwsvpcConfiguration: &ecstypes.AwsVpcConfiguration{}},
 	}
 
 	if len(cfg.Task.Tags) > 0 {
-		tags := []ecs.Tag{}
+		tags := []ecstypes.Tag{}
 		for _, tag := range cfg.Task.Tags {
-			tags = append(tags, ecs.Tag{
+			tags = append(tags, ecstypes.Tag{
 				Key:   aws.String(tag.Key),
 				Value: aws.String(tag.Value),
 			})
@@ -131,9 +139,9 @@ func (c awsEcsClient) buildTaskInput(cfg TaskConfig) *ecs.RunTaskInput {
 
 	if cfg.Task.LaunchType != "" {
 		if cfg.Task.LaunchType == "EC2" {
-			input.LaunchType = ecs.LaunchTypeEc2
+			input.LaunchType = ecstypes.LaunchTypeEc2
 		} else if cfg.Task.LaunchType == "FARGATE" {
-			input.LaunchType = ecs.LaunchTypeFargate
+			input.LaunchType = ecstypes.LaunchTypeFargate
 		}
 	}
 
@@ -145,9 +153,9 @@ func (c awsEcsClient) buildTaskInput(cfg TaskConfig) *ecs.RunTaskInput {
 	if cfg.Task.NetworkConfiguration.TaskAWSVPCConfiguration.AssignPublicIP != "" {
 		assignPublicIp := cfg.Task.NetworkConfiguration.TaskAWSVPCConfiguration.AssignPublicIP
 		if assignPublicIp == "ENABLED" {
-			input.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp = ecs.AssignPublicIpEnabled
+			input.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp = ecstypes.AssignPublicIpEnabled
 		} else if assignPublicIp == "DISABLED" {
-			input.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp = ecs.AssignPublicIpDisabled
+			input.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp = ecstypes.AssignPublicIpDisabled
 		}
 	}
 	if len(cfg.Task.NetworkConfiguration.TaskAWSVPCConfiguration.SecurityGroups) > 0 {
@@ -168,74 +176,8 @@ func (c awsEcsClient) StopTask(ctx context.Context, taskARN string) error {
 		Reason:  aws.String("stopped by nomad-ecs-driver automation"),
 	}
 
-	_, err := c.ecsClient.StopTaskRequest(&input).Send(ctx)
+	_, err := c.ecsClient.StopTask(ctx, &input)
 	return err
-}
-
-func NewContainerDefinition(command []string, entryPoint []string, env map[string]string, image string, memory int64, name string, tcpMap map[int64]int64, privileged bool, repositoryCredentials string, workingDirectory string) ecs.ContainerDefinition {
-	environment := make([]ecs.KeyValuePair, 0, len(env))
-	for k, v := range env {
-		environment = append(environment, ecs.KeyValuePair{
-			Name:  aws.String(k),
-			Value: aws.String(v),
-		})
-	}
-	portMappings := make([]ecs.PortMapping, 0, len(tcpMap))
-	for k, v := range tcpMap {
-		portMappings = append(portMappings, ecs.PortMapping{
-			ContainerPort: aws.Int64(v),
-			HostPort:      aws.Int64(k),
-			Protocol:      "tcp",
-		})
-	}
-	var repCred *ecs.RepositoryCredentials
-	if repositoryCredentials != "" {
-		repCred = &ecs.RepositoryCredentials{CredentialsParameter: aws.String(repositoryCredentials)}
-	}
-	var workDir *string
-	if workingDirectory != "" {
-		workDir = aws.String(workingDirectory)
-	}
-	return ecs.ContainerDefinition{
-		Command: command,
-		// Cpu:                    nil,
-		// DependsOn:              nil,
-		// DisableNetworking:      nil,
-		// DnsSearchDomains:       nil,
-		// DnsServers:             nil,
-		// DockerLabels:           nil,
-		// DockerSecurityOptions:  nil,
-		EntryPoint:  entryPoint,
-		Environment: environment,
-		// Essential:              nil,
-		// ExtraHosts:             nil,
-		// FirelensConfiguration:  nil,
-		// HealthCheck:            nil,
-		// Hostname:               nil,
-		Image: aws.String(image),
-		// Interactive:            nil,
-		// Links:                  nil,
-		// LinuxParameters:        nil,
-		// LogConfiguration:       nil,
-		Memory: aws.Int64(memory),
-		// MemoryReservation:      nil,
-		// MountPoints:            nil,
-		Name:         aws.String(name),
-		PortMappings: portMappings,
-		Privileged:   aws.Bool(privileged),
-		// PseudoTerminal:         nil,
-		// ReadonlyRootFilesystem: nil,
-		RepositoryCredentials: repCred,
-		// ResourceRequirements:   nil,
-		// Secrets:                nil,
-		// StartTimeout:           nil,
-		// StopTimeout:            nil,
-		// SystemControls:         nil,
-		// Ulimits:                nil,
-		// User:                   nil,
-		// VolumesFrom:            nil,
-		WorkingDirectory: workDir,
-	}
 }
 
 func checkSlice[t comparable](arr1, arr2 []t, order bool) (same bool) {
@@ -265,13 +207,13 @@ func checkSlice[t comparable](arr1, arr2 []t, order bool) (same bool) {
 	return true
 }
 
-func checkKVSlice(arr1, arr2 []ecs.KeyValuePair, order bool) (same bool) {
+func checkKVSlice(arr1, arr2 []ecstypes.KeyValuePair, order bool) (same bool) {
 	if len(arr1) != len(arr2) {
 		return false
 	}
 	if order {
 		for i, el1 := range arr1 {
-			if aws.StringValue(el1.Name) != aws.StringValue(arr2[i].Name) || aws.StringValue(el1.Value) != aws.StringValue(arr2[i].Value) {
+			if aws.ToString(el1.Name) != aws.ToString(arr2[i].Name) || aws.ToString(el1.Value) != aws.ToString(arr2[i].Value) {
 				return false
 			}
 		}
@@ -279,7 +221,7 @@ func checkKVSlice(arr1, arr2 []ecs.KeyValuePair, order bool) (same bool) {
 		for _, el1 := range arr1 {
 			found := false
 			for _, el2 := range arr2 {
-				if aws.StringValue(el1.Name) == aws.StringValue(el2.Name) && aws.StringValue(el1.Value) == aws.StringValue(el2.Value) {
+				if aws.ToString(el1.Name) == aws.ToString(el2.Name) && aws.ToString(el1.Value) == aws.ToString(el2.Value) {
 					found = true
 					break
 				}
@@ -293,13 +235,13 @@ func checkKVSlice(arr1, arr2 []ecs.KeyValuePair, order bool) (same bool) {
 	return true
 }
 
-func checkPMSlice(arr1, arr2 []ecs.PortMapping, order bool) (same bool) {
+func checkPMSlice(arr1, arr2 []ecstypes.PortMapping, order bool) (same bool) {
 	if len(arr1) != len(arr2) {
 		return false
 	}
 	if order {
 		for i, el1 := range arr1 {
-			if el1.Protocol != arr2[i].Protocol || aws.Int64Value(el1.HostPort) != aws.Int64Value(arr2[i].HostPort) || aws.Int64Value(el1.ContainerPort) != aws.Int64Value(arr2[i].ContainerPort) {
+			if el1.Protocol != arr2[i].Protocol || aws.ToInt32(el1.HostPort) != aws.ToInt32(arr2[i].HostPort) || aws.ToInt32(el1.ContainerPort) != aws.ToInt32(arr2[i].ContainerPort) {
 				return false
 			}
 		}
@@ -307,7 +249,7 @@ func checkPMSlice(arr1, arr2 []ecs.PortMapping, order bool) (same bool) {
 		for _, el1 := range arr1 {
 			found := false
 			for _, el2 := range arr2 {
-				if el1.Protocol == el2.Protocol && aws.Int64Value(el1.HostPort) == aws.Int64Value(el2.HostPort) && aws.Int64Value(el1.ContainerPort) == aws.Int64Value(el2.ContainerPort) {
+				if el1.Protocol == el2.Protocol && aws.ToInt32(el1.HostPort) == aws.ToInt32(el2.HostPort) && aws.ToInt32(el1.ContainerPort) == aws.ToInt32(el2.ContainerPort) {
 					found = true
 					break
 				}
@@ -321,49 +263,49 @@ func checkPMSlice(arr1, arr2 []ecs.PortMapping, order bool) (same bool) {
 }
 
 // CheckTaskDefinition checks if the task definition matches the already registered task definition
-func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error) {
+func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error) {
 	listInput := ecs.ListTaskDefinitionFamiliesInput{
 		FamilyPrefix: aws.String(family),
 	}
-	listResp, err := c.ecsClient.ListTaskDefinitionFamiliesRequest(&listInput).Send(ctx)
+	listResp, err := c.ecsClient.ListTaskDefinitionFamilies(ctx, &listInput)
 	if err != nil {
 		return false, err
 	}
 	c.logger.Info("ListTaskDefinitionFamilies", "resp", listResp)
-	if len(listResp.ListTaskDefinitionFamiliesOutput.Families) == 0 {
+	if len(listResp.Families) == 0 {
 		return false, nil
 	}
 	input := ecs.DescribeTaskDefinitionInput{
 		// Include:        nil,
 		TaskDefinition: aws.String(family), // family (latest active), family:revision or full arn
 	}
-	resp, err := c.ecsClient.DescribeTaskDefinitionRequest(&input).Send(ctx)
+	resp, err := c.ecsClient.DescribeTaskDefinition(ctx, &input)
 	if err != nil {
 		return false, err
 	}
 
 	isSame := true
-	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Cpu) != cpu {
-		c.logger.Info("diff cpu", "cpu", cpu, "resp cpu", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Cpu))
+	if aws.ToString(resp.TaskDefinition.Cpu) != cpu {
+		c.logger.Info("diff cpu", "cpu", cpu, "resp cpu", aws.ToString(resp.TaskDefinition.Cpu))
 		isSame = false
 	}
-	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Memory) != memory {
-		c.logger.Info("diff memory", "memory", memory, "resp memory", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.Memory))
+	if aws.ToString(resp.TaskDefinition.Memory) != memory {
+		c.logger.Info("diff memory", "memory", memory, "resp memory", aws.ToString(resp.TaskDefinition.Memory))
 		isSame = false
 	}
-	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.ExecutionRoleArn) != executionRoleArn {
-		c.logger.Info("diff exec role", "exec role", executionRoleArn, "resp exec role", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.ExecutionRoleArn))
+	if aws.ToString(resp.TaskDefinition.ExecutionRoleArn) != executionRoleArn {
+		c.logger.Info("diff exec role", "exec role", executionRoleArn, "resp exec role", aws.ToString(resp.TaskDefinition.ExecutionRoleArn))
 		isSame = false
 	}
-	if aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.TaskRoleArn) != taskRoleArn {
-		c.logger.Info("diff task role", "task role", taskRoleArn, "resp task role", aws.StringValue(resp.DescribeTaskDefinitionOutput.TaskDefinition.TaskRoleArn))
+	if aws.ToString(resp.TaskDefinition.TaskRoleArn) != taskRoleArn {
+		c.logger.Info("diff task role", "task role", taskRoleArn, "resp task role", aws.ToString(resp.TaskDefinition.TaskRoleArn))
 		isSame = false
 	}
 	for _, cd := range containerDefinitions {
 		found := false
-		for _, existingCd := range resp.DescribeTaskDefinitionOutput.TaskDefinition.ContainerDefinitions {
+		for _, existingCd := range resp.TaskDefinition.ContainerDefinitions {
 			c.logger.Info("checking", "existing cd", existingCd)
-			if aws.Int64Value(existingCd.Cpu) == aws.Int64Value(cd.Cpu) && aws.Int64Value(existingCd.Memory) == aws.Int64Value(cd.Memory) && checkSlice(existingCd.Command, cd.Command, true) && checkSlice(existingCd.EntryPoint, cd.EntryPoint, true) && checkKVSlice(existingCd.Environment, cd.Environment, false) && aws.StringValue(existingCd.Image) == aws.StringValue(cd.Image) && checkPMSlice(existingCd.PortMappings, cd.PortMappings, false) {
+			if existingCd.Cpu == cd.Cpu && aws.ToInt32(existingCd.Memory) == aws.ToInt32(cd.Memory) && checkSlice(existingCd.Command, cd.Command, true) && checkSlice(existingCd.EntryPoint, cd.EntryPoint, true) && checkKVSlice(existingCd.Environment, cd.Environment, false) && aws.ToString(existingCd.Image) == aws.ToString(cd.Image) && checkPMSlice(existingCd.PortMappings, cd.PortMappings, false) {
 				found = true
 				break
 			}
@@ -377,7 +319,7 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 	return isSame, nil
 }
 
-func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecs.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int64, error) {
+func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int32, error) {
 	input := ecs.RegisterTaskDefinitionInput{
 		ContainerDefinitions: containerDefinitions,
 		Cpu:                  aws.String(cpu),
@@ -397,9 +339,39 @@ func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string,
 	if taskRoleArn != "" {
 		input.TaskRoleArn = aws.String(taskRoleArn)
 	}
-	resp, err := c.ecsClient.RegisterTaskDefinitionRequest(&input).Send(ctx)
+	resp, err := c.ecsClient.RegisterTaskDefinition(ctx, &input)
 	if err != nil {
 		return 0, err
 	}
-	return aws.Int64Value(resp.RegisterTaskDefinitionOutput.TaskDefinition.Revision), nil
+	return resp.TaskDefinition.Revision, nil
+}
+
+func (c awsEcsClient) CreateLogGroup(ctx context.Context, logGroupName string) error {
+	input := cloudwatchlogs.DescribeLogGroupsInput{
+		LogGroupNamePrefix: aws.String(logGroupName),
+	}
+	cont := true
+	for cont {
+		resp, err := c.cwClient.DescribeLogGroups(ctx, &input)
+		if err != nil {
+			return err
+		}
+		for _, lg := range resp.LogGroups {
+			if aws.ToString(lg.LogGroupName) == logGroupName {
+				return nil
+			}
+		}
+		cont = aws.ToString(resp.NextToken) != ""
+		input.NextToken = aws.String(aws.ToString(resp.NextToken))
+	}
+
+	createInput := cloudwatchlogs.CreateLogGroupInput{
+		LogGroupName: aws.String(logGroupName),
+	}
+	_, err := c.cwClient.CreateLogGroup(ctx, &createInput)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

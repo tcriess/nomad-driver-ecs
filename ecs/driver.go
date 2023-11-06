@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/aws/external"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad-driver-ecs/version"
 	"github.com/hashicorp/nomad/client/structs"
@@ -83,15 +85,21 @@ var (
 	})
 
 	awsECSContainerDefinitionSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"name":            hclspec.NewAttr("name", "string", true),
-		"cpu":             hclspec.NewAttr("cpu", "number", true),
-		"memory":          hclspec.NewAttr("memory", "number", true),
-		"command":         hclspec.NewAttr("command", "list(string)", false),
-		"entry_point":     hclspec.NewAttr("entry_point", "list(string)", false),
-		"environment":     hclspec.NewAttr("environment", "list(map(string))", false),
-		"image":           hclspec.NewAttr("image", "string", true),
-		"port_mappings":   hclspec.NewBlockList("port_mappings", awsECSPortMappingSpec),
-		"credentials_arn": hclspec.NewAttr("credentials_arn", "string", false),
+		"name":              hclspec.NewAttr("name", "string", true),
+		"cpu":               hclspec.NewAttr("cpu", "number", true),
+		"memory":            hclspec.NewAttr("memory", "number", true),
+		"command":           hclspec.NewAttr("command", "list(string)", false),
+		"entry_point":       hclspec.NewAttr("entry_point", "list(string)", false),
+		"environment":       hclspec.NewAttr("environment", "list(map(string))", false),
+		"image":             hclspec.NewAttr("image", "string", true),
+		"port_mappings":     hclspec.NewBlockList("port_mappings", awsECSPortMappingSpec),
+		"credentials_arn":   hclspec.NewAttr("credentials_arn", "string", false),
+		"log_configuration": hclspec.NewBlock("log_configuration", false, awsECSLogConfigSpec),
+	})
+
+	awsECSLogConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"log_driver": hclspec.NewAttr("log_driver", "string", true),
+		"options":    hclspec.NewAttr("options", "map(string)", false),
 	})
 
 	awsECSPortMappingSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -187,15 +195,21 @@ type ECSTaskDefinition struct {
 }
 
 type ECSContainerDefinition struct {
-	Name           string        `codec:"name"`
-	Cpu            int64         `codec:"cpu"`
-	Memory         int64         `codec:"memory"`
-	Command        []string      `codec:"command"`
-	EntryPoint     []string      `codec:"entry_point"`
-	Environment    []Tag         `codec:"environment"`
-	Image          string        `codec:"image"`
-	PortMappings   []PortMapping `codec:"port_mappings"`
-	CredentialsArn string        `codec:"credentials_arn"`
+	Name             string              `codec:"name"`
+	Cpu              int32               `codec:"cpu"`
+	Memory           int32               `codec:"memory"`
+	Command          []string            `codec:"command"`
+	EntryPoint       []string            `codec:"entry_point"`
+	Environment      []Tag               `codec:"environment"`
+	Image            string              `codec:"image"`
+	PortMappings     []PortMapping       `codec:"port_mappings"`
+	CredentialsArn   string              `codec:"credentials_arn"`
+	LogConfiguration ECSLogConfiguration `codec:"log_configuration"`
+}
+
+type ECSLogConfiguration struct {
+	LogDriver string            `codec:"log_driver"`
+	Options   map[string]string `codec:"options"`
 }
 
 type Tag struct {
@@ -204,8 +218,8 @@ type Tag struct {
 }
 
 type PortMapping struct {
-	ContainerPort int64  `codec:"container_port"`
-	HostPort      int64  `codec:"host_port"`
+	ContainerPort int32  `codec:"container_port"`
+	HostPort      int32  `codec:"host_port"`
 	Protocol      string `codec:"protocol"`
 }
 
@@ -275,7 +289,7 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 }
 
 func (d *Driver) getAwsSdk(cluster string) (ecsClientInterface, error) {
-	awsCfg, err := external.LoadDefaultAWSConfig()
+	awsCfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		return nil, fmt.Errorf("unable to load SDK config: %v", err)
 	}
@@ -286,7 +300,8 @@ func (d *Driver) getAwsSdk(cluster string) (ecsClientInterface, error) {
 
 	return awsEcsClient{
 		cluster:   cluster,
-		ecsClient: ecs.New(awsCfg),
+		ecsClient: ecs.NewFromConfig(awsCfg),
+		cwClient:  cloudwatchlogs.NewFromConfig(awsCfg),
 		logger:    d.logger,
 	}, nil
 }
@@ -421,38 +436,46 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
 	if driverConfig.InlineTaskDefinition {
-		containerDefinitions := make([]ecs.ContainerDefinition, len(driverConfig.TaskDefinition.ContainerDefinitions))
+		containerDefinitions := make([]ecstypes.ContainerDefinition, len(driverConfig.TaskDefinition.ContainerDefinitions))
 		for i, cd := range driverConfig.TaskDefinition.ContainerDefinitions {
-			env := make([]ecs.KeyValuePair, len(cd.Environment))
+			env := make([]ecstypes.KeyValuePair, len(cd.Environment))
 			for j, e := range cd.Environment {
-				env[j] = ecs.KeyValuePair{
+				env[j] = ecstypes.KeyValuePair{
 					Name:  aws.String(e.Key),
 					Value: aws.String(e.Value),
 				}
 			}
-			pm := make([]ecs.PortMapping, len(cd.PortMappings))
+			pm := make([]ecstypes.PortMapping, len(cd.PortMappings))
 			for j, singlePortMapping := range cd.PortMappings {
-				pm[j] = ecs.PortMapping{
-					ContainerPort: aws.Int64(singlePortMapping.ContainerPort),
-					HostPort:      aws.Int64(singlePortMapping.HostPort),
-					Protocol:      ecs.TransportProtocol(singlePortMapping.Protocol),
+				pm[j] = ecstypes.PortMapping{
+					ContainerPort: aws.Int32(singlePortMapping.ContainerPort),
+					HostPort:      aws.Int32(singlePortMapping.HostPort),
+					Protocol:      ecstypes.TransportProtocol(singlePortMapping.Protocol),
 				}
 			}
-			var rc *ecs.RepositoryCredentials
+			var rc *ecstypes.RepositoryCredentials
 			if cd.CredentialsArn != "" {
-				rc = &ecs.RepositoryCredentials{
+				rc = &ecstypes.RepositoryCredentials{
 					CredentialsParameter: aws.String(cd.CredentialsArn),
 				}
 			}
+			var logConfiguration *ecstypes.LogConfiguration
+			if cd.LogConfiguration.LogDriver != "" {
+				logConfiguration = &ecstypes.LogConfiguration{
+					LogDriver: ecstypes.LogDriver(cd.LogConfiguration.LogDriver),
+					Options:   cd.LogConfiguration.Options,
+				}
+			}
 
-			containerDefinitions[i] = ecs.ContainerDefinition{
+			containerDefinitions[i] = ecstypes.ContainerDefinition{
 				Name:                  aws.String(cd.Name),
-				Cpu:                   aws.Int64(cd.Cpu),
-				Memory:                aws.Int64(cd.Memory),
+				Cpu:                   cd.Cpu,
+				Memory:                aws.Int32(cd.Memory),
 				Command:               cd.Command,
 				EntryPoint:            cd.EntryPoint,
 				Environment:           env,
 				Image:                 aws.String(cd.Image),
+				LogConfiguration:      logConfiguration,
 				PortMappings:          pm,
 				RepositoryCredentials: rc,
 			}
@@ -462,6 +485,16 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 			return nil, nil, fmt.Errorf("failed to check ECS task definition: %v", err)
 		}
 		if !same {
+			// first create the log group, if not there yet
+			for _, cd := range driverConfig.TaskDefinition.ContainerDefinitions {
+				if lg, ok := cd.LogConfiguration.Options["awslogs_group"]; ok && lg != "" {
+					err := d.client.CreateLogGroup(ctx, lg)
+					if err != nil {
+						d.logger.Error("failed to create log group", "log_group", lg, "err", err.Error())
+						return nil, nil, err
+					}
+				}
+			}
 			// the task definition is new, so we create it here
 			familyVersion, err := d.client.RegisterTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
 			if err != nil {
@@ -470,6 +503,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 			d.logger.Info("new task definition version", "family", driverConfig.TaskDefinition.Family, "version", familyVersion)
 		}
 	}
+
 	arn, ip, lastStatus, err := d.client.RunTask(ctx, driverConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to start ECS task: %v", err)
