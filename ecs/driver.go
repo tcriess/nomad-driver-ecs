@@ -99,7 +99,7 @@ var (
 
 	awsECSLogConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		"log_driver": hclspec.NewAttr("log_driver", "string", true),
-		"options":    hclspec.NewAttr("options", "map(string)", false),
+		"options":    hclspec.NewAttr("options", "list(map(string))", false),
 	})
 
 	awsECSPortMappingSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -208,8 +208,8 @@ type ECSContainerDefinition struct {
 }
 
 type ECSLogConfiguration struct {
-	LogDriver string            `codec:"log_driver"`
-	Options   map[string]string `codec:"options"`
+	LogDriver string `codec:"log_driver"`
+	Options   []Tag  `codec:"options"`
 }
 
 type Tag struct {
@@ -461,9 +461,13 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 			}
 			var logConfiguration *ecstypes.LogConfiguration
 			if cd.LogConfiguration.LogDriver != "" {
+				opts := make(map[string]string)
+				for _, opt := range cd.LogConfiguration.Options {
+					opts[opt.Key] = opt.Value
+				}
 				logConfiguration = &ecstypes.LogConfiguration{
 					LogDriver: ecstypes.LogDriver(cd.LogConfiguration.LogDriver),
-					Options:   cd.LogConfiguration.Options,
+					Options:   opts,
 				}
 			}
 
@@ -487,11 +491,13 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		if !same {
 			// first create the log group, if not there yet
 			for _, cd := range driverConfig.TaskDefinition.ContainerDefinitions {
-				if lg, ok := cd.LogConfiguration.Options["awslogs-group"]; ok && lg != "" {
-					err := d.client.CreateLogGroup(ctx, lg)
-					if err != nil {
-						d.logger.Error("failed to create log group", "log_group", lg, "err", err.Error())
-						return nil, nil, err
+				for _, opt := range cd.LogConfiguration.Options {
+					if opt.Key == "awslogs-group" {
+						err := d.client.CreateLogGroup(ctx, opt.Value)
+						if err != nil {
+							d.logger.Error("failed to create log group", "log_group", opt.Value, "err", err.Error())
+							return nil, nil, err
+						}
 					}
 				}
 			}
