@@ -306,8 +306,17 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 		for _, existingCd := range resp.TaskDefinition.ContainerDefinitions {
 			c.logger.Info("checking", "existing cd", existingCd)
 			if existingCd.Cpu == cd.Cpu && aws.ToInt32(existingCd.Memory) == aws.ToInt32(cd.Memory) && checkSlice(existingCd.Command, cd.Command, true) && checkSlice(existingCd.EntryPoint, cd.EntryPoint, true) && checkKVSlice(existingCd.Environment, cd.Environment, false) && aws.ToString(existingCd.Image) == aws.ToString(cd.Image) && checkPMSlice(existingCd.PortMappings, cd.PortMappings, false) {
-				found = true
-				break
+				if existingCd.LogConfiguration != nil && cd.LogConfiguration != nil {
+					if existingCd.LogConfiguration.LogDriver == cd.LogConfiguration.LogDriver {
+						found = true
+						break
+					}
+				} else {
+					if existingCd.LogConfiguration == nil && cd.LogConfiguration == nil {
+						found = true
+						break
+					}
+				}
 			}
 			c.logger.Info("differences", "command", checkSlice(existingCd.Command, cd.Command, true), "entrypoint", checkSlice(existingCd.EntryPoint, cd.EntryPoint, true), "env", checkKVSlice(existingCd.Environment, cd.Environment, false), "pm", checkPMSlice(existingCd.PortMappings, cd.PortMappings, false))
 		}
