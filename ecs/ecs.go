@@ -23,7 +23,8 @@ type ecsClientInterface interface {
 
 	// DescribeTaskStatus attempts to return the current health status of the
 	// ECS task and the IP address and should be used for health checking.
-	DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, error)
+	// It also returns the stop code, if applicable
+	DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, string, error)
 
 	// RunTask is used to trigger the running of a new ECS task based on the
 	// provided configuration. The ARN of the task, the IP address, run status,
@@ -76,7 +77,7 @@ func (c awsEcsClient) DescribeCluster(ctx context.Context) error {
 
 // DescribeTaskStatus satisfies the ecs.ecsClientInterface DescribeTaskStatus
 // interface function.
-func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, error) {
+func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (string, string, string, error) {
 	input := ecs.DescribeTasksInput{
 		Cluster: aws.String(c.cluster),
 		Tasks:   []string{taskARN},
@@ -84,13 +85,14 @@ func (c awsEcsClient) DescribeTaskStatus(ctx context.Context, taskARN string) (s
 
 	resp, err := c.ecsClient.DescribeTasks(ctx, &input)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	ip := ""
 	if len(resp.Tasks[0].Containers) > 0 && len(resp.Tasks[0].Containers[0].NetworkInterfaces) > 0 {
 		ip = ptr.ToString(resp.Tasks[0].Containers[0].NetworkInterfaces[0].PrivateIpv4Address)
 	}
-	return *resp.Tasks[0].LastStatus, ip, nil
+	stopCode := string(resp.Tasks[0].StopCode)
+	return *resp.Tasks[0].LastStatus, ip, stopCode, nil
 }
 
 // RunTask satisfies the ecs.ecsClientInterface RunTask interface function.

@@ -3,6 +3,7 @@ package ecs
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,7 +126,7 @@ func (h *taskHandle) run() {
 		select {
 		case <-time.After(5 * time.Second):
 
-			status, _, err := h.ecsClient.DescribeTaskStatus(h.ctx, h.arn)
+			status, _, stopCode, err := h.ecsClient.DescribeTaskStatus(h.ctx, h.arn)
 			if err != nil {
 				h.handleRunError(err, "failed to find ECS task")
 				return
@@ -146,7 +147,22 @@ func (h *taskHandle) run() {
 			// be started.
 			if status == ecsTaskStatusDeactivating || status == ecsTaskStatusStopping ||
 				status == ecsTaskStatusDeprovisioning || status == ecsTaskStatusStopped {
-				h.handleRunError(fmt.Errorf("ECS task status in terminal phase"), "task status: "+status)
+				if strings.HasSuffix(stopCode, "Error") || strings.HasSuffix(stopCode, "Exception") {
+					h.handleRunError(fmt.Errorf("ECS task status in terminal phase"), "task status: "+status)
+					return
+				}
+				switch stopCode {
+				case "TaskFailedToStart", "CannotPullContainer":
+					h.handleRunError(fmt.Errorf("ECS task status in terminal phase"), "task status: "+status)
+					return
+				}
+				h.stateLock.Lock()
+				defer h.stateLock.Unlock()
+
+				h.procState = drivers.TaskStateExited
+				h.exitResult.ExitCode = 0
+				h.exitResult.Signal = 0
+				h.completedAt = time.Now()
 				return
 			}
 
@@ -202,7 +218,7 @@ func (h *taskHandle) stopTask() error {
 	for {
 		select {
 		case <-time.After(5 * time.Second):
-			status, _, err := h.ecsClient.DescribeTaskStatus(context.TODO(), h.arn)
+			status, _, _, err := h.ecsClient.DescribeTaskStatus(context.TODO(), h.arn)
 			if err != nil {
 				return err
 			}

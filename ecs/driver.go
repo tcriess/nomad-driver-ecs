@@ -589,7 +589,7 @@ func (d *Driver) handleStart(ctx context.Context, arn string, startCh chan *star
 
 		case <-time.After(10 * time.Second):
 		}
-		lastStatus, ip, err = d.client.DescribeTaskStatus(ctx, arn)
+		lastStatus, ip, _, err = d.client.DescribeTaskStatus(ctx, arn)
 		if err != nil {
 			d.logger.Warn("ecs describe task", "err", err.Error())
 			startCh <- &startResult{
