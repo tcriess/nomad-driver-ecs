@@ -112,6 +112,7 @@ var (
 		"family":                hclspec.NewAttr("family", "string", true),
 		"cpu":                   hclspec.NewAttr("cpu", "string", true),
 		"memory":                hclspec.NewAttr("memory", "string", true),
+		"ephemeral_storage":     hclspec.NewAttr("ephemeral_storage", "number", false),
 		"execution_role_arn":    hclspec.NewAttr("execution_role_arn", "string", true),
 		"task_role_arn":         hclspec.NewAttr("task_role_arn", "string", false),
 		"container_definitions": hclspec.NewBlockList("container_definitions", awsECSContainerDefinitionSpec),
@@ -189,6 +190,7 @@ type ECSTaskDefinition struct {
 	Family               string                   `codec:"family"`
 	Cpu                  string                   `codec:"cpu"`
 	Memory               string                   `codec:"memory"`
+	EphemeralStorage     int32                    `codec:"ephemeral_storage"`
 	ExecutionRoleArn     string                   `codec:"execution_role_arn"`
 	TaskRoleArn          string                   `codec:"task_role_arn"`
 	ContainerDefinitions []ECSContainerDefinition `codec:"container_definitions"`
@@ -484,7 +486,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 				RepositoryCredentials: rc,
 			}
 		}
-		same, err := d.client.CheckTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
+		same, err := d.client.CheckTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.EphemeralStorage, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to check ECS task definition: %v", err)
 		}
@@ -502,7 +504,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 				}
 			}
 			// the task definition is new, so we create it here
-			familyVersion, err := d.client.RegisterTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
+			familyVersion, err := d.client.RegisterTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.EphemeralStorage, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to register ECS task definition: %v", err)
 			}

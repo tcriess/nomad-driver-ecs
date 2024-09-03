@@ -38,10 +38,10 @@ type ecsClientInterface interface {
 
 	// RegisterTaskDefinition creates a new task definition, which can then be
 	// used to run a task.
-	RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int32, error)
+	RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, ephemeralStorage int32, executionRoleArn string, taskRoleArn string) (int32, error)
 
 	// CheckTaskDefinition checks if the task definition is the same as the one in AWS
-	CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error)
+	CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, ephemeralStorage int32, executionRoleArn string, taskRoleArn string) (bool, error)
 
 	// CreateLogGroup creates a new log group (if it does not exist already)
 	CreateLogGroup(ctx context.Context, logGroupName string) error
@@ -265,7 +265,7 @@ func checkPMSlice(arr1, arr2 []ecstypes.PortMapping, order bool) (same bool) {
 }
 
 // CheckTaskDefinition checks if the task definition matches the already registered task definition
-func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (bool, error) {
+func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, ephemeralStorage int32, executionRoleArn string, taskRoleArn string) (bool, error) {
 	listInput := ecs.ListTaskDefinitionFamiliesInput{
 		FamilyPrefix: aws.String(family),
 	}
@@ -294,6 +294,17 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 	if aws.ToString(resp.TaskDefinition.Memory) != memory {
 		c.logger.Info("diff memory", "memory", memory, "resp memory", aws.ToString(resp.TaskDefinition.Memory))
 		isSame = false
+	}
+	if resp.TaskDefinition.EphemeralStorage != nil {
+		if resp.TaskDefinition.EphemeralStorage.SizeInGiB != ephemeralStorage {
+			c.logger.Info("diff ephemeral storage", "ephemeral storage", ephemeralStorage, "resp memory", resp.TaskDefinition.EphemeralStorage.SizeInGiB)
+			isSame = false
+		}
+	} else {
+		if ephemeralStorage != 0 {
+			c.logger.Info("diff ephemeral storage", "ephemeral storage", ephemeralStorage, "resp memory", 0)
+			isSame = false
+		}
 	}
 	if aws.ToString(resp.TaskDefinition.ExecutionRoleArn) != executionRoleArn {
 		c.logger.Info("diff exec role", "exec role", executionRoleArn, "resp exec role", aws.ToString(resp.TaskDefinition.ExecutionRoleArn))
@@ -330,12 +341,19 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 	return isSame, nil
 }
 
-func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, executionRoleArn string, taskRoleArn string) (int32, error) {
+func (c awsEcsClient) RegisterTaskDefinition(ctx context.Context, family string, containerDefinitions []ecstypes.ContainerDefinition, cpu string, memory string, ephemeralStorage int32, executionRoleArn string, taskRoleArn string) (int32, error) {
+	var eph *ecstypes.EphemeralStorage
+	if ephemeralStorage > 0 {
+		eph = &ecstypes.EphemeralStorage{
+			SizeInGiB: ephemeralStorage,
+		}
+	}
 	input := ecs.RegisterTaskDefinitionInput{
 		ContainerDefinitions: containerDefinitions,
 		Cpu:                  aws.String(cpu),
 		ExecutionRoleArn:     aws.String(executionRoleArn),
 		Family:               aws.String(family),
+		EphemeralStorage:     eph,
 		// InferenceAccelerators:   nil,
 		// IpcMode:                 "",
 		Memory:      aws.String(memory),
