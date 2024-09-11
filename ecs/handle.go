@@ -126,7 +126,7 @@ func (h *taskHandle) run() {
 		select {
 		case <-time.After(5 * time.Second):
 
-			status, _, stopCode, err := h.ecsClient.DescribeTaskStatus(h.ctx, h.arn)
+			status, _, stopCode, exitCode, err := h.ecsClient.DescribeTaskStatus(h.ctx, h.arn)
 			if err != nil {
 				h.handleRunError(err, "failed to find ECS task")
 				return
@@ -154,6 +154,10 @@ func (h *taskHandle) run() {
 				switch stopCode {
 				case "TaskFailedToStart", "CannotPullContainer":
 					h.handleRunError(fmt.Errorf("ECS task status in terminal phase"), "task status: "+status)
+					return
+				}
+				if exitCode != 0 {
+					h.handleRunError(fmt.Errorf("ECS task container exit code %d", exitCode), "task status: "+status)
 					return
 				}
 				h.stateLock.Lock()
@@ -218,7 +222,7 @@ func (h *taskHandle) stopTask() error {
 	for {
 		select {
 		case <-time.After(5 * time.Second):
-			status, _, _, err := h.ecsClient.DescribeTaskStatus(context.TODO(), h.arn)
+			status, _, _, _, err := h.ecsClient.DescribeTaskStatus(context.TODO(), h.arn)
 			if err != nil {
 				return err
 			}
