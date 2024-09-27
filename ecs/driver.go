@@ -59,6 +59,7 @@ var (
 		"port_map":               hclspec.NewAttr("port_map", "list(map(number))", false),
 		"start_timeout":          hclspec.NewAttr("start_timeout", "string", false),
 		"inline_task_definition": hclspec.NewAttr("inline_task_definition", "bool", false),
+		"termination_ok":         hclspec.NewAttr("termination_ok", "bool", false),
 		"task_definition":        hclspec.NewBlock("task_definition", false, awsECSTaskDefinitionSpec),
 	})
 
@@ -172,6 +173,7 @@ type TaskConfig struct {
 	Advertise            bool               `codec:"advertise"`
 	StartTimeout         string             `codec:"start_timeout"`
 	InlineTaskDefinition bool               `codec:"inline_task_definition"`
+	TerminationOk        bool               `codec:"termination_ok"`
 	TaskDefinition       ECSTaskDefinition  `codec:"task_definition"`
 }
 
@@ -244,6 +246,7 @@ type TaskState struct {
 	ARN           string
 	StartedAt     time.Time
 	DriverNetwork *drivers.DriverNetwork
+	TerminationOk bool
 }
 
 // NewPlugin returns a new drivers.DriverPlugin implementation
@@ -560,6 +563,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		StartedAt:     time.Now(),
 		ARN:           arn,
 		DriverNetwork: net,
+		TerminationOk: driverConfig.TerminationOk,
 	}
 
 	h := newTaskHandle(d.logger, driverState, cfg, d.client, net)

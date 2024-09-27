@@ -37,12 +37,13 @@ type taskHandle struct {
 	// stateLock syncs access to all fields below
 	stateLock sync.RWMutex
 
-	taskConfig  *drivers.TaskConfig
-	procState   drivers.TaskState
-	startedAt   time.Time
-	completedAt time.Time
-	exitResult  *drivers.ExitResult
-	doneCh      chan struct{}
+	taskConfig    *drivers.TaskConfig
+	procState     drivers.TaskState
+	startedAt     time.Time
+	completedAt   time.Time
+	exitResult    *drivers.ExitResult
+	doneCh        chan struct{}
+	terminationOk bool // is it ok to terminate the task
 
 	// detach from ecs task instead of killing it if true.
 	detach bool
@@ -58,18 +59,19 @@ func newTaskHandle(logger hclog.Logger, ts TaskState, taskConfig *drivers.TaskCo
 	logger = logger.Named("handle").With("arn", ts.ARN)
 
 	h := &taskHandle{
-		arn:        ts.ARN,
-		ecsClient:  ecsClient,
-		taskConfig: taskConfig,
-		procState:  drivers.TaskStateRunning,
-		startedAt:  ts.StartedAt,
-		exitResult: &drivers.ExitResult{},
-		logger:     logger,
-		doneCh:     make(chan struct{}),
-		detach:     false,
-		ctx:        ctx,
-		cancel:     cancel,
-		net:        net,
+		arn:           ts.ARN,
+		ecsClient:     ecsClient,
+		taskConfig:    taskConfig,
+		procState:     drivers.TaskStateRunning,
+		startedAt:     ts.StartedAt,
+		exitResult:    &drivers.ExitResult{},
+		logger:        logger,
+		doneCh:        make(chan struct{}),
+		detach:        false,
+		ctx:           ctx,
+		cancel:        cancel,
+		net:           net,
+		terminationOk: ts.TerminationOk,
 	}
 
 	return h
@@ -158,6 +160,10 @@ func (h *taskHandle) run() {
 				}
 				if exitCode != 0 {
 					h.handleRunError(fmt.Errorf("ECS task container exit code %d", exitCode), "task status: "+status)
+					return
+				}
+				if !h.terminationOk {
+					h.handleRunError(fmt.Errorf("ECS task status in terminal phase"), "task status: "+status)
 					return
 				}
 				h.stateLock.Lock()
