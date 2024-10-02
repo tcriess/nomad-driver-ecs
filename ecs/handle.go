@@ -23,6 +23,7 @@ const (
 	ecsTaskStatusStopping       = "STOPPING"
 	ecsTaskStatusDeprovisioning = "DEPROVISIONING"
 	ecsTaskStatusStopped        = "STOPPED"
+	ecsTaskStatusDeleted        = "DELETED"
 )
 
 type taskHandle struct {
@@ -148,7 +149,8 @@ func (h *taskHandle) run() {
 			// this to the servers so that a new allocation, and ECS task can
 			// be started.
 			if status == ecsTaskStatusDeactivating || status == ecsTaskStatusStopping ||
-				status == ecsTaskStatusDeprovisioning || status == ecsTaskStatusStopped {
+				status == ecsTaskStatusDeprovisioning || status == ecsTaskStatusStopped ||
+				status == ecsTaskStatusDeleted {
 				if strings.HasSuffix(stopCode, "Error") || strings.HasSuffix(stopCode, "Exception") {
 					h.handleRunError(fmt.Errorf("ECS task status in terminal phase"), "task status: "+status)
 					return
