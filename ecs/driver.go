@@ -96,11 +96,18 @@ var (
 		"port_mappings":     hclspec.NewBlockList("port_mappings", awsECSPortMappingSpec),
 		"credentials_arn":   hclspec.NewAttr("credentials_arn", "string", false),
 		"log_configuration": hclspec.NewBlock("log_configuration", false, awsECSLogConfigSpec),
+		"restart_policy":    hclspec.NewBlock("restart_policy", false, awsECSRestartPolicySpec),
 	})
 
 	awsECSLogConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		"log_driver": hclspec.NewAttr("log_driver", "string", true),
 		"options":    hclspec.NewAttr("options", "list(map(string))", false),
+	})
+
+	awsECSRestartPolicySpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"enabled":                hclspec.NewAttr("enabled", "bool", true),
+		"ignored_exit_codes":     hclspec.NewAttr("ignored_exit_codes", "list(number)", false),
+		"restart_attempt_period": hclspec.NewAttr("restart_attempt_period", "number", false),
 	})
 
 	awsECSPortMappingSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -209,11 +216,18 @@ type ECSContainerDefinition struct {
 	PortMappings     []PortMapping       `codec:"port_mappings"`
 	CredentialsArn   string              `codec:"credentials_arn"`
 	LogConfiguration ECSLogConfiguration `codec:"log_configuration"`
+	RestartPolicy    ECSRestartPolicy    `codec:"restart_policy"`
 }
 
 type ECSLogConfiguration struct {
 	LogDriver string `codec:"log_driver"`
 	Options   []Tag  `codec:"options"`
+}
+
+type ECSRestartPolicy struct {
+	Enabled              bool    `codec:"enabled"`
+	IgnoredExitCodes     []int32 `codec:"ignored_exit_codes"`
+	RestartAttemptPeriod int32   `codec:"restart_attempt_period"`
 }
 
 type Tag struct {
@@ -475,6 +489,16 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 					Options:   opts,
 				}
 			}
+			var rp *ecstypes.ContainerRestartPolicy
+			if cd.RestartPolicy.Enabled {
+				rp = &ecstypes.ContainerRestartPolicy{
+					Enabled:          aws.Bool(cd.RestartPolicy.Enabled),
+					IgnoredExitCodes: cd.RestartPolicy.IgnoredExitCodes,
+				}
+				if cd.RestartPolicy.RestartAttemptPeriod > 0 {
+					rp.RestartAttemptPeriod = aws.Int32(cd.RestartPolicy.RestartAttemptPeriod)
+				}
+			}
 
 			containerDefinitions[i] = ecstypes.ContainerDefinition{
 				Name:                  aws.String(cd.Name),
@@ -487,6 +511,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 				LogConfiguration:      logConfiguration,
 				PortMappings:          pm,
 				RepositoryCredentials: rc,
+				RestartPolicy:         rp,
 			}
 		}
 		same, err := d.client.CheckTaskDefinition(ctx, driverConfig.TaskDefinition.Family, containerDefinitions, driverConfig.TaskDefinition.Cpu, driverConfig.TaskDefinition.Memory, driverConfig.TaskDefinition.EphemeralStorage, driverConfig.TaskDefinition.ExecutionRoleArn, driverConfig.TaskDefinition.TaskRoleArn)

@@ -325,13 +325,31 @@ func (c awsEcsClient) CheckTaskDefinition(ctx context.Context, family string, co
 			if existingCd.Cpu == cd.Cpu && aws.ToInt32(existingCd.Memory) == aws.ToInt32(cd.Memory) && checkSlice(existingCd.Command, cd.Command, true) && checkSlice(existingCd.EntryPoint, cd.EntryPoint, true) && checkKVSlice(existingCd.Environment, cd.Environment, false) && aws.ToString(existingCd.Image) == aws.ToString(cd.Image) && checkPMSlice(existingCd.PortMappings, cd.PortMappings, false) {
 				if existingCd.LogConfiguration != nil && cd.LogConfiguration != nil {
 					if existingCd.LogConfiguration.LogDriver == cd.LogConfiguration.LogDriver {
-						found = true
-						break
+						if existingCd.RestartPolicy != nil && cd.RestartPolicy != nil {
+							if aws.ToBool(existingCd.RestartPolicy.Enabled) == aws.ToBool(cd.RestartPolicy.Enabled) && checkSlice(existingCd.RestartPolicy.IgnoredExitCodes, cd.RestartPolicy.IgnoredExitCodes, false) && aws.ToInt32(existingCd.RestartPolicy.RestartAttemptPeriod) == aws.ToInt32(cd.RestartPolicy.RestartAttemptPeriod) {
+								found = true
+								break
+							}
+						} else {
+							if existingCd.RestartPolicy == nil && cd.RestartPolicy == nil {
+								found = true
+								break
+							}
+						}
 					}
 				} else {
 					if existingCd.LogConfiguration == nil && cd.LogConfiguration == nil {
-						found = true
-						break
+						if existingCd.RestartPolicy != nil && cd.RestartPolicy != nil {
+							if aws.ToBool(existingCd.RestartPolicy.Enabled) == aws.ToBool(cd.RestartPolicy.Enabled) && checkSlice(existingCd.RestartPolicy.IgnoredExitCodes, cd.RestartPolicy.IgnoredExitCodes, false) && aws.ToInt32(existingCd.RestartPolicy.RestartAttemptPeriod) == aws.ToInt32(cd.RestartPolicy.RestartAttemptPeriod) {
+								found = true
+								break
+							}
+						} else {
+							if existingCd.RestartPolicy == nil && cd.RestartPolicy == nil {
+								found = true
+								break
+							}
+						}
 					}
 				}
 			}
